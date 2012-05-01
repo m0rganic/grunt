@@ -1,6 +1,4 @@
 /*!
- * kinvey-js-0.9.0
- *
  * Copyright (c) 2012 Kinvey, Inc. All rights reserved.
  *
  * Licensed to Kinvey, Inc. under one or more contributor
@@ -74,7 +72,26 @@
 
   // Convenient method for binding context to anonymous functions.
   var bind = function(thisArg, fn) {
-    return (fn || function() { }).bind(thisArg);
+    fn || (fn = function() { });
+    return fn.bind ? fn.bind(thisArg) : function() {
+      return fn.apply(thisArg, arguments);
+    };
+  };
+
+  /*globals localStorage*/
+
+  // Define the Storage class. Simple wrapper around the localStorage interface.
+  var Storage = {
+    get: function(key) {
+      var value = localStorage.getItem(key);
+      return value ? JSON.parse(value) : null;
+    },
+    set: function(key, value) {
+      localStorage.setItem(key, JSON.stringify(value));
+    },
+    remove: function(key) {
+      localStorage.removeItem(key);
+    }
   };
 
   // Current user.
@@ -92,7 +109,7 @@
    * 
    * @constant
    */
-  Kinvey.SDK_VERSION = '0.1.0dev';
+  Kinvey.SDK_VERSION = '0.9.1';
 
   /**
    * Returns current user, or null if not set.
@@ -109,13 +126,12 @@
    * @example <code>
    * Kinvey.init({
    *   appKey: 'your-app-key',
-   *   appSecret: 'your-app-secret',
-   *   env: 'node'
+   *   appSecret: 'your-app-secret'
    * });
    * </code>
    * 
    * @param {Object} options Kinvey credentials. Object expects properties:
-   *          "appKey", "appSecret". Optional properties: "env".
+   *          "appKey", "appSecret".
    * @throws {Error}
    *           <ul>
    *           <li>On empty appKey,</li>
@@ -123,40 +139,39 @@
    *           </ul>
    */
   Kinvey.init = function(options) {
-    if('undefined' === typeof options.appKey || null == options.appKey) {
+    options || (options = {});
+    if(null == options.appKey) {
       throw new Error('appKey must be defined');
     }
-    if('undefined' === typeof options.appSecret || null == options.appSecret) {
+    if(null == options.appSecret) {
       throw new Error('appSecret must be defined');
     }
 
     // Store credentials.
     Kinvey.appKey = options.appKey;
     Kinvey.appSecret = options.appSecret;
-    Kinvey.env = options.env || 'HTML5';
   };
 
   /**
    * Round trips a request to the server and back, helps ensure connectivity.
    * 
    * @example <code>
-   * Kinvey.ping(function() {
-   *   console.log('Ping successful', this.kinvey, this.version);
-   * }, function(error) {
-   *   console.log('Ping failed', error.error);
+   * Kinvey.ping({
+   *   success: function(response) {
+   *     console.log('Ping successful', response.kinvey, response.version);
+   *   },
+   *   error: function(error) {
+   *     console.log('Ping failed', error.error);
+   *   }
    * });
    * </code>
    * 
-   * @param {function()} [success] Success callback. {this} is a response object
-   *          with properties: "kinvey", "version".
-   * @param {function(Object)} [failure] Failure callback, {this} is an empty
-   *          object. Only argument is an error object.
+   * @param {Object} [options]
+   * @param {function(response)} [options.success] Success callback.
+   * @param {function(error)} [options.error] Failure callback.
    */
-  Kinvey.ping = function(success, failure) {
-    var net = Kinvey.Net.factory(Kinvey.Net.APPDATA_API, '');
-    net.send(function(response) {
-      bind(response, success)();
-    }, bind({}, failure));
+  Kinvey.ping = function(options) {
+    Kinvey.Net.factory(Kinvey.Net.APPDATA_API, '').send(options);
   };
 
   /**
@@ -247,7 +262,7 @@
      * @return {Object} One of Kinvey.Net.* adapters.
      */
     factory: function(api, collection, id) {
-      if('node' === Kinvey.env.toLowerCase() && 'undefined' !== typeof Kinvey.Net.Node) {
+      if('undefined' !== typeof exports) {// node.js
         return new Kinvey.Net.Node(api, collection, id);
       }
       return new Kinvey.Net.Http(api, collection, id);
@@ -335,17 +350,24 @@
      *          error object.
      * @throws {Error} On unsupported client.
      */
-    send: function(success, failure) {
+    send: function(options) {
+      options || (options = {});
+      options.success || (options.success = function() { });
+      options.error || (options.error = function() { });
+
       // A current user is required for all but the User API.
       if(null === Kinvey.getCurrentUser() && Kinvey.Net.USER_API !== this.api) {
-        Kinvey.User.init(bind(this, function() {
-          this._process(success, failure);
-        }), failure);
+        Kinvey.User.init({
+          success: bind(this, function() {
+            this._process(options);
+          }),
+          error: options.error
+        });
         return;
       }
 
       // There is a current user already, or the User API is requested.
-      this._process(success, failure);
+      this._process(options);
     },
 
     /**
@@ -461,12 +483,11 @@
      * @private
      * @param {number} statusCode Status code.
      * @param {string} body Response body.
-     * @param {function(Object)} success Success callback. Only argument is the
-     *          parsed response body.
-     * @param {function(Object)} failure Failure callback. Only argument is the
-     *          parsed response body.
+     * @param {Object} options
+     * @param {function(response)} options.success Success callback.
+     * @param {function(error)} options.error Failure callback.
      */
-    _handleResponse: function(statusCode, body, success, failure) {
+    _handleResponse: function(statusCode, body, options) {
       // Parse body. Failing to parse body is not a big deal.
       try {
         body = JSON.parse(body);
@@ -475,19 +496,23 @@
       }
 
       // Fire callback.
-      (200 <= statusCode && 300 > statusCode) || 304 === statusCode ? success(body) : failure(body);
+      if((200 <= statusCode && 300 > statusCode) || 304 === statusCode) {
+        options.success(body);
+      }
+      else {
+        options.error(body);
+      }
     },
 
     /**
      * Processes and fires HTTP request.
      * 
      * @private
-     * @param {function(Object)} success Success callback. Only argument is a
-     *          response object.
-     * @param {function(Object)} failure Failure callback. Only argument is an
-     *          error object.
+     * @param {Object} options
+     * @param {function(response)} options.success Success callback.
+     * @param {function(error)} options.error Failure callback.
      */
-    _process: function(success, failure) {
+    _process: function(options) {
       if('undefined' === typeof XMLHttpRequest) {
         throw new Error('XMLHttpRequest is not supported');
       }
@@ -506,12 +531,12 @@
       var self = this;
       request.onerror = function() {
         // Unfortunately, no error message is provided by XHR.
-        failure({
+        options.error({
           error: 'Error'
         });
       };
       request.onload = function() {
-        self._handleResponse(this.status, this.responseText, success, failure);
+        self._handleResponse(this.status, this.responseText, options);
       };
 
       // Fire request.
@@ -557,24 +582,28 @@
     /**
      * Destroys entity.
      * 
-     * @param {function()} [success] Success callback. {this} is the (destroyed)
-     *          entity instance.
-     * @param {function(Object)} [failure] Failure callback. {this} is the
-     *          entity instance. Only argument is an error object.
+     * @param {Object} [options]
+     * @param {function()} [options.success] Success callback.
+     * @param {function(error)} [options.error] Failure callback.
      */
-    destroy: function(success, failure) {
+    destroy: function(options) {
+      options || (options = {});
+
       // Return instantly if entity is not saved yet.
       if(this.isNew()) {
-        bind(this, success)();
+        options.success && options.success();
         return;
       }
 
       // Send request.
       var net = Kinvey.Net.factory(this.API, this.collection, this.getId());
       net.setOperation(Kinvey.Net.DELETE);
-      net.send(bind(this, function() {
-        bind(this, success)();
-      }), bind(this, failure));
+      net.send({
+        success: function() {
+          options.success && options.success();
+        },
+        error: options.error
+      });
     },
 
     /**
@@ -616,44 +645,49 @@
      * Loads entity by id.
      * 
      * @param {string} id Entity id.
-     * @param {function()} [success] Success callback. {this} is the entity
-     *          instance.
-     * @param {function(Object)} [failure] Failure callback. {this} is the
-     *          entity instance. Only argument is an error object.
+     * @param {Object} [options]
+     * @param {function(entity)} [options.success] Success callback.
+     * @param {function(error)} [options.error] Failure callback.
      * @throws {Error} On empty id.
      */
-    load: function(id, success, failure) {
+    load: function(id, options) {
       if(null == id) {
         throw new Error('Id must not be null');
       }
+      options || (options = {});
 
       // Retrieve data.
-      var net = Kinvey.Net.factory(this.API, this.collection, id);
-      net.send(bind(this, function(response) {
-        this.attr = response;
-        bind(this, success)();
-      }), bind(this, failure));
+      Kinvey.Net.factory(this.API, this.collection, id).send({
+        success: bind(this, function(response) {
+          this.attr = response;
+          options.success && options.success(this);
+        }),
+        error: options.error
+      });
     },
 
     /**
      * Saves entity.
      * 
-     * @param {function()} [success] Success callback. {this} is the entity
-     *          instance.
-     * @param {function(Object)} [failure] Failure callback. {this} is the
-     *          entity instance. Only argument is an error object.
+     * @param {Object} [options]
+     * @param {function(entity)} [options.success] Success callback.
+     * @param {function(error)} [options.error] Failure callback.
      */
-    save: function(success, failure) {
+    save: function(options) {
+      options || (options = {});
       var operation = this.isNew() ? Kinvey.Net.CREATE : Kinvey.Net.UPDATE;
 
       // Retrieve data.
       var net = Kinvey.Net.factory(this.API, this.collection, this.getId());
       net.setData(this.attr);// include attributes
       net.setOperation(operation);
-      net.send(bind(this, function(response) {
-        this.attr = response;
-        bind(this, success)();
-      }), bind(this, failure));
+      net.send({
+        success: bind(this, function(response) {
+          this.attr = response;
+          options.success && options.success(this);
+        }),
+        error: options.error
+      });
     },
 
     /**
@@ -711,7 +745,7 @@
     list: [ ],
 
     // Mapped entity class.
-    map: Kinvey.Entity,
+    entity: Kinvey.Entity,
 
     /**
      * Creates new collection.
@@ -734,11 +768,8 @@
       if(null == name) {
         throw new Error('Name must not be null');
       }
-      if(query && !(query instanceof Kinvey.Query)) {
-        throw new Error('Query must be an instanceof Kinvey.Query');
-      }
+      this.setQuery(query);
       this.name = name;
-      this.query = query;
     },
 
     /** @lends Kinvey.Collection# */
@@ -746,31 +777,36 @@
     /**
      * Clears collection. This method is NOT atomic, it stops on first failure.
      * 
-     * @param {function()} [success] Success callback. {this} is the collection
-     *          instance.
-     * @param {function(Object)} [failure] Failure callback. {this} is the
-     *          collection instance. Only argument is an error object.
+     * @param {Object} [options]
+     * @param {function()} [success] Success callback.
+     * @param {function(error)} [error] Failure callback.
      */
-    clear: function(success, failure) {
-      failure = bind(this, failure);
+    clear: function(options) {
+      options || (options = {});
       this.list = [ ];// clear list
 
       // Retrieve all entities, and remove them one by one.
-      this.fetch(bind(this, function() {
-        var it = bind(this, function() {
-          var entity = this.list[0];
-          if(entity) {
-            entity.destroy(bind(this, function() {
-              this.list.shift();
-              it();
-            }), failure);
-          }
-          else {
-            bind(this, success)();
-          }
-        });
-        it();
-      }), failure);
+      this.fetch({
+        success: bind(this, function() {
+          var iterator = bind(this, function() {
+            var entity = this.list[0];
+            if(entity) {
+              entity.destroy({
+                success: bind(this, function() {
+                  this.list.shift();
+                  iterator();
+                }),
+                error: options.error
+              });
+            }
+            else {
+              options.success && options.success();
+            }
+          });
+          iterator();
+        }),
+        error: options.error
+      });
     },
 
     /**
@@ -778,51 +814,78 @@
      * 
      * @example <code>
      * var collection = new Kinvey.Collection('my-collection');
-     * collection.count(function(i) {
-     *   console.log('Number of entities: ' + i);
-     * }, function(error) {
-     *   console.log('Count failed', error.error);
+     * collection.count({
+     *   success: function(i) {
+     *    console.log('Number of entities: ' + i);
+     *   },
+     *   error: function(error) {
+     *     console.log('Count failed', error.error);
+     *   }
      * });
      * </code>
      * 
-     * @param {function(number)} [success] Success callback. {this} is the
-     *          Collection instance. Only argument is the number of entities.
-     * @param {function(Object)} [failure] Failure callback. {this} is the
-     *          Collection instance. Only argument is an error object.
+     * @param {Object} [options]
+     * @param {function(number)} [success] Success callback.
+     * @param {function(error)} [error] Failure callback.
      */
-    count: function(success, failure) {
+    count: function(options) {
+      options || (options = {});
+
       var net = Kinvey.Net.factory(this.API, this.name, '_count');
       this.query && net.setQuery(this.query);// set query
-      net.send(bind(this, function(response) {
-        bind(this, success)(response.count);
-      }), bind(this, failure));
+      net.send({
+        success: function(response) {
+          options.success && options.success(response.count);
+        },
+        error: options.error
+      });
     },
 
     /**
      * Fetches entities in collection.
      * 
-     * @param {function()} [success] Success callback. {this} is the collection
-     *          instance.
-     * @param {function(Object)} [failure] Failure callback. {this} is the
-     *          collection instance. Only argument is an error object.
+     * @param {Object} [options]
+     * @param {function(list)} [options.success] Success callback.
+     * @param {function(error)} [options.error] Failure callback.
      */
-    fetch: function(success, failure) {
+    fetch: function(options) {
+      options || (options = {});
+
       // Clear list.
       this.list = [ ];
 
       // Send request.
       var net = Kinvey.Net.factory(this.API, this.name);
       this.query && net.setQuery(this.query);// set query
-      net.send(bind(this, function(response) {
-        response.forEach(bind(this, function(attr) {
-          this.list.push(new this.map(this.name, attr));
-        }));
-        bind(this, success)();
-      }), bind(this, failure));
+      net.send({
+        success: bind(this, function(response) {
+          response.forEach(bind(this, function(attr) {
+            this.list.push(new this.entity(this.name, attr));
+          }));
+          options.success && options.success(this.list);
+        }),
+        error: options.error
+      });
+    },
+
+    /**
+     * Sets query.
+     * 
+     * @param {Kinvey.Query} [query] Query.
+     * @throws {Error} On invalid instance.
+     */
+    setQuery: function(query) {
+      if(query && !(query instanceof Kinvey.Query)) {
+        throw new Error('Query must be an instanceof Kinvey.Query');
+      }
+      this.query = query || null;
     }
   });
 
-  /*globals localStorage*/
+  // Function to get the cache key for this app.
+  var CACHE_TAG = function() {
+    return 'Kinvey.' + Kinvey.appKey;
+  };
 
   // Define the Kinvey User class.
   Kinvey.User = Kinvey.Entity.extend({
@@ -862,19 +925,23 @@
      * @override
      * @see Kinvey.Entity#destroy
      */
-    destroy: function(success, failure) {
+    destroy: function(options) {
+      options || (options = {});
       if(!this.isLoggedIn) {
-        bind(this, failure)({
+        options.error && options.error({
           error: 'This request requires the master secret'
         });
         return;
       }
 
       // Users are allowed to remove themselves.
-      Kinvey.Entity.prototype.destroy.call(this, function() {
-        this.logout();
-        bind(this, success)();
-      }, bind(this, failure));
+      Kinvey.Entity.prototype.destroy.call(this, {
+        success: bind(this, function() {
+          this.logout();
+          options.success && options.success();
+        }),
+        error: options.error
+      });
     },
 
     /**
@@ -898,23 +965,26 @@
     /**
      * Logs in user.
      * 
-     * @example <code>
+     * @example <code> 
      * var user = new Kinvey.User();
-     * user.login('username', 'password', function() {
-     *   console.log('Login successful');
-     * }, function(error) {
-     *   console.log('Login failed', error);
+     * user.login('username', 'password', {
+     *   success: function() {
+     *     console.log('Login successful');
+     *   },
+     *   error: function(error) {
+     *     console.log('Login failed', error);
+     *   }
      * });
      * </code>
      * 
      * @param {string} username Username.
      * @param {string} password Password.
-     * @param {function()} [success] Success callback. {this} is the User
-     *          instance.
-     * @param {function(Object)} [failure] Failure callback. {this} is the User
-     *          instance. Only argument is an error object.
+     * @param {Object} [options]
+     * @param {function(entity)} [options.success] Success callback.
+     * @param {function(error)} [options.error] Failure callback.
      */
-    login: function(username, password, success, failure) {
+    login: function(username, password, options) {
+      options || (options = {});
       // Make sure only one user is active at the time.
       var currentUser = Kinvey.getCurrentUser();
       if(null !== currentUser) {
@@ -929,14 +999,17 @@
       var net = Kinvey.Net.factory(this.API, this.collection, 'login');
       net.setData(this.attr);
       net.setOperation(Kinvey.Net.CREATE);
-      net.send(bind(this, function(response) {
-        // Update attributes. Preserve password since it is part of
-        // the authorization.
-        this.attr = response;
-        this.setPassword(password);
-        this._login();
-        bind(this, success)();
-      }), bind(this, failure));
+      net.send({
+        success: bind(this, function(response) {
+          // Update attributes. Preserve password since it is part of
+          // the authorization.
+          this.attr = response;
+          this.setPassword(password);
+          this._login();
+          options.success && options.success(this);
+        }),
+        error: options.error
+      });
     },
 
     /**
@@ -957,9 +1030,10 @@
      * @override
      * @see Kinvey.Entity#save
      */
-    save: function(success, failure) {
+    save: function(options) {
+      options || (options = {});
       if(!this.isLoggedIn) {
-        bind(this, failure)({
+        options.error && options.error({
           error: 'This request requires the master secret'
         });
         return;
@@ -968,11 +1042,14 @@
       // Parent method will always update. Response does not include the
       // password, so persist it manually.
       var password = this.getPassword();
-      Kinvey.Entity.prototype.save.call(this, function() {
-        this.setPassword(password);
-        this._login();
-        bind(this, success)();
-      }, failure);
+      Kinvey.Entity.prototype.save.call(this, {
+        success: bind(this, function() {
+          this.setPassword(password);
+          this._login();
+          options.success && options.success(this);
+        }),
+        error: options.error
+      });
     },
 
     /**
@@ -1007,7 +1084,7 @@
      * @private
      */
     _deleteFromDisk: function() {
-      localStorage.removeItem(Kinvey.User.CACHE_TAG);
+      Storage.remove(CACHE_TAG());
     },
 
     /**
@@ -1028,47 +1105,35 @@
      * @private
      */
     _saveToDisk: function() {
-      localStorage.setItem(Kinvey.User.CACHE_TAG, JSON.stringify(this));
+      Storage.set(CACHE_TAG(), this);
     }
   }, {
     /** @lends Kinvey.User */
-
-    // Cache tag.
-    CACHE_TAG: 'Kinvey.currentUser',
 
     /**
      * Creates the current user.
      * 
      * @example <code>
-     * var user = Kinvey.create('username', 'password', function() {
-     *   console.log('User created', this);
-     * }, function(error) {
-     *   console.log('User not created', error.error);
+     * Kinvey.create({
+     *   username: 'username'
+     * }, {
+     *   success: function(user) {
+     *     console.log('User created', user);
+     *   },
+     *   error: function(error) {
+     *     console.log('User not created', error.error);
+     *   }
      * });
      * </code>
      * 
-     * @param {string} [username] Username. Defaults to auto-generated one.
-     * @param {string} [password] Password. Defaults to auto-generated one.
-     * @param {function()} [success] Success callback. {this} is the User
-     *          instance.
-     * @param {function(Object)} [failure] Failure callback. {this} is the User
-     *          instance. Only argument is an error object.
+     * @param {Object} attr Attributes.
+     * @param {Object} [options]
+     * @param {function(user)} [options.success] Success callback.
+     * @param {function(error)} [options.error] Failure callback.
      * @return {Kinvey.User} The user instance (not necessarily persisted yet).
      */
-    create: function(username, password, success, failure) {
-      // Parse arguments.
-      if(null == username || 'function' === typeof username) {
-        // Auto-generate credentials.
-        success = username;
-        failure = password;
-        username = password = '';
-      }
-      else if(null == password || 'function' === typeof password) {
-        // Only auto-generate password.
-        failure = success;
-        success = password;
-        password = '';
-      }
+    create: function(attr, options) {
+      options || (options = {});
 
       // Make sure only one user is active at the time.
       var currentUser = Kinvey.getCurrentUser();
@@ -1076,19 +1141,16 @@
         currentUser.logout();
       }
 
-      // Instantiate a user object.
-      var user = new Kinvey.User();
-      user.setUsername(username);
-      user.setPassword(password);
-
-      // Persist, and implicitly mark the created user as logged in.
-      Kinvey.Entity.prototype.save.call(user, function() {
-        this._login();
-        bind(this, success)();
-      }, failure);
-
-      // Return the instance.
-      return user;
+      // Persist, and mark the created user as logged in.
+      var user = new Kinvey.User(attr);
+      Kinvey.Entity.prototype.save.call(user, {
+        success: bind(user, function() {
+          this._login();
+          options.success && options.success(this);
+        }),
+        error: options.error
+      });
+      return user;// return the instance
     },
 
     /**
@@ -1096,31 +1158,39 @@
      * anonymous user. This method is called internally when doing a network
      * request. Manually invoking this function is however allowed.
      * 
-     * @param {function()} [success] Success callback. {this} is the current
-     *          user instance.
-     * @param {function()} [failure] Failure callback. {this} is a user
-     *          instance. Only argument is an error object.
+     * @param {Object} [options]
+     * @param {function(user)} [options.success] Success callback.
+     * @param {function(error)} [options.error] Failure callback.
      * @return {Kinvey.User} The user instance. (not necessarily persisted yet).
      */
-    init: function(success, failure) {
+    init: function(options) {
+      options || (options = {});
+
       // First, check whether there already is a current user.
       var user = Kinvey.getCurrentUser();
       if(null !== user) {
-        bind(user, success)();
+        options.success && options.success(user);
         return user;
       }
 
       // Second, check if user attributes are stored locally on the device.
-      var attr = JSON.parse(localStorage.getItem(Kinvey.User.CACHE_TAG));
+      var attr = Storage.get(CACHE_TAG());
       if(null !== attr && null != attr.username && null != attr.password) {
+        // Extend the error callback, so local data can be destroyed if stale.
+        var original = options.error;
+        options.error = function(error) {
+          Storage.remove(CACHE_TAG());
+          original && original(error);
+        };
+
         // Re-authenticate user to ensure it is not stale.
         user = new Kinvey.User();
-        user.login(attr.username, attr.password, success, failure);
+        user.login(attr.username, attr.password, options);
         return user;
       }
 
       // No cached user available either, create anonymous user.
-      return Kinvey.User.create(success, failure);
+      return Kinvey.User.create({}, options);
     }
   });
 
@@ -1130,7 +1200,7 @@
     API: Kinvey.Net.USER_API,
 
     // Mapped entity class.
-    map: Kinvey.User,
+    entity: Kinvey.User,
 
     /**
      * Creates new user collection.
@@ -1156,10 +1226,11 @@
      * Clears collection. This action is not allowed.
      * 
      * @override
-     * @throws {Error}
      */
-    clear: function() {
-      throw new Error('This request requires the master secret');
+    clear: function(options) {
+      options && options.error && options.error({
+        error: 'This request requires the master secret'
+      });
     }
   });
 
